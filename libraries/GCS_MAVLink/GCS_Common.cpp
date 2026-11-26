@@ -60,7 +60,8 @@
 #include "MissionItemProtocol_Waypoints.h"
 #include "MissionItemProtocol_Rally.h"
 #include "MissionItemProtocol_Fence.h"
-
+#include <AP_Math/crc.h>
+#include <AP_Math/AP_Math.h>
 #include <stdio.h>
 
 #if HAL_RCINPUT_WITH_AP_RADIO
@@ -1627,6 +1628,15 @@ void GCS_MAVLINK::send_message(enum ap_message id)
 void GCS_MAVLINK::packetReceived(const mavlink_status_t &status,
                                  const mavlink_message_t &msg)
 {
+    if(!auth_ok){
+        if(msg.msgid == MAVLINK_MSG_ID_HEARTBEAT){
+            handle_heartbeat(msg);
+        }else if (msg.msgid == MAVLINK_MSG_ID_COMMAND_LONG){
+          auth_handle_cmd(msg);    
+        }
+        return;
+    }
+    
     // we exclude radio packets because we historically used this to
     // make it possible to use the CLI over the radio
     if (msg.msgid != MAVLINK_MSG_ID_RADIO && msg.msgid != MAVLINK_MSG_ID_RADIO_STATUS) {
@@ -1665,6 +1675,9 @@ void GCS_MAVLINK::packetReceived(const mavlink_status_t &status,
 void
 GCS_MAVLINK::update_receive(uint32_t max_time_us)
 {
+    if(auth_ok && AP_HAL::millis() - gcs().sysid_myggcs_last_seen_time_ms()>5000){
+        auth_ok = false ; 
+    }
     // do absolutely nothing if we are locked
     if (locked()) {
         return;
@@ -3749,14 +3762,54 @@ void GCS_MAVLINK::handle_osd_param_config(const mavlink_message_t &msg) const
 #endif
 }
 
-void GCS_MAVLINK::handle_heartbeat(const mavlink_message_t &msg) const
+#define AUTH_SECRET "IZIventures#Pvt#Ltd"
+void GCS_MAVLINK::handle_heartbeat(const mavlink_message_t &msg) 
 {
     // if the heartbeat is from our GCS then we don't failsafe for
     // now...
     if (msg.sysid == sysid_my_gcs()) {
         gcs().sysid_myggcs_seen(AP_HAL::millis());
+
+        //for checking secret code every 2 second
+        uint32_t now = AP_HAL :: millis();
+        if (!auth_ok && now - auth_sent_ms > 2000){
+            auth_sent_ms = now ;
+            auth_send_challenge();
+        }
     }
 }
+
+void GCS_MAVLINK::auth_send_challenge()
+{
+    const char chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ23456789";
+    for(uint8_t i = 0 ; i < 8 ; i++){
+        auth_nonce[i] = chars[get_random16() % (sizeof(chars) - 1)];
+    }
+    auth_nonce[8]=0;
+    send_text(MAV_SEVERITY_INFO,"AUTH:%s",auth_nonce);
+}
+
+uint32_t GCS_MAVLINK::auth_expected() const
+{
+    char buf[32];
+    hal.util->snprintf(buf ,sizeof(buf), "%s%s" , AUTH_SECRET ,auth_nonce);
+    return crc_crc32(0,(const uint8_t*)buf , strlen(buf)) & 0xFFFFFF;
+}
+
+void GCS_MAVLINK::auth_handle_cmd(const mavlink_message_t &msg){
+    mavlink_command_long_t pkt;
+    mavlink_msg_command_long_decode(&msg ,&pkt);
+    if (pkt.command != MAV_CMD_USER_1 ){
+        return;
+    }
+    if((uint32_t)pkt.param1 == auth_expected()){
+        auth_ok = true;
+        send_text(MAV_SEVERITY_INFO  ,"AUTH OK");
+    }else{
+        send_text(MAV_SEVERITY_WARNING ,"AUTH FAILED");
+    }
+}
+
 
 /*
   handle messages which don't require vehicle specific data

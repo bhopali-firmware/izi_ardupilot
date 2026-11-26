@@ -501,7 +501,15 @@ protected:
     // saveable rate of each stream
     AP_Int16        *streamRates;
 
-    void handle_heartbeat(const mavlink_message_t &msg) const;
+    void handle_heartbeat(const mavlink_message_t &msg) ;
+    // GCS auth process
+    bool auth_ok;
+    uint32_t auth_sent_ms;
+    char auth_nonce[9];
+
+    void auth_send_challenge();
+    void auth_handle_cmd(const mavlink_message_t &msg);
+    uint32_t auth_expected() const;
 
     virtual bool persist_streamrates() const { return false; }
     void handle_request_data_stream(const mavlink_message_t &msg);
